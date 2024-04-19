@@ -46,7 +46,7 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define L1I_SET 64
 #define L1I_WAY 8
 #define L1I_RQ_SIZE 64
-#define L1I_WQ_SIZE 64 
+#define L1I_WQ_SIZE 64
 #define L1I_PQ_SIZE 32
 #define L1I_MSHR_SIZE 8
 #define L1I_LATENCY 4
@@ -55,10 +55,10 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define L1D_SET 64
 #define L1D_WAY 12
 #define L1D_RQ_SIZE 64
-#define L1D_WQ_SIZE 64 
+#define L1D_WQ_SIZE 64
 #define L1D_PQ_SIZE 8
 #define L1D_MSHR_SIZE 16
-#define L1D_LATENCY 5 
+#define L1D_LATENCY 5
 
 // L2 CACHE
 #define L2C_SET 1024
@@ -78,13 +78,31 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define LLC_MSHR_SIZE NUM_CPUS*64
 #define LLC_LATENCY 20  // 4/5 (L1I or L1D) + 10 + 20 = 34/35 cycles
 
+enum class SetState {
+
+    VERY_HOT,
+    HOT,
+    COLD,
+    VERY_COLD,
+    INVALID
+};
+
+struct REMAP_INFO {
+
+    SetState state;
+    uint32_t num_access;
+    vector<uint32_t> remap_sets;
+    uint32_t *original_set;
+};
+
 class CACHE : public MEMORY {
-  public:
+public:
     uint32_t cpu;
     const string NAME;
     const uint32_t NUM_SET, NUM_WAY, NUM_LINE, WQ_SIZE, RQ_SIZE, PQ_SIZE, MSHR_SIZE;
     uint32_t LATENCY;
     BLOCK **block;
+    REMAP_INFO ** remap_table;
     int fill_level;
     uint32_t MAX_READ, MAX_FILL;
     uint32_t reads_available_this_cycle;
@@ -99,10 +117,10 @@ class CACHE : public MEMORY {
 
     // queues
     PACKET_QUEUE WQ{NAME + "_WQ", WQ_SIZE}, // write queue
-                 RQ{NAME + "_RQ", RQ_SIZE}, // read queue
-                 PQ{NAME + "_PQ", PQ_SIZE}, // prefetch queue
-                 MSHR{NAME + "_MSHR", MSHR_SIZE}, // MSHR
-                 PROCESSED{NAME + "_PROCESSED", ROB_SIZE}; // processed queue
+    RQ{NAME + "_RQ", RQ_SIZE}, // read queue
+    PQ{NAME + "_PQ", PQ_SIZE}, // prefetch queue
+    MSHR{NAME + "_MSHR", MSHR_SIZE}, // MSHR
+    PROCESSED{NAME + "_PROCESSED", ROB_SIZE}; // processed queue
 
     uint64_t sim_access[NUM_CPUS][NUM_TYPES],
              sim_hit[NUM_CPUS][NUM_TYPES],
@@ -112,28 +130,44 @@ class CACHE : public MEMORY {
              roi_miss[NUM_CPUS][NUM_TYPES];
 
     uint64_t total_miss_latency;
-    
+
     // constructor
-    CACHE(string v1, uint32_t v2, int v3, uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7, uint32_t v8) 
+    CACHE(string v1, uint32_t v2, int v3, uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7, uint32_t v8)
         : NAME(v1), NUM_SET(v2), NUM_WAY(v3), NUM_LINE(v4), WQ_SIZE(v5), RQ_SIZE(v6), PQ_SIZE(v7), MSHR_SIZE(v8) {
 
         LATENCY = 0;
 
         // cache block
         block = new BLOCK* [NUM_SET];
-        for (uint32_t i=0; i<NUM_SET; i++) {
-            block[i] = new BLOCK[NUM_WAY]; 
+        for (uint32_t i = 0; i < NUM_SET; i++) {
+            block[i] = new BLOCK[NUM_WAY];
 
-            for (uint32_t j=0; j<NUM_WAY; j++) {
+            for (uint32_t j = 0; j < NUM_WAY; j++) {
                 block[i][j].lru = j;
             }
         }
 
-        for (uint32_t i=0; i<NUM_CPUS; i++) {
+        if (NAME == 'LLC') {
+
+            remap_table = new REMAP_INFO*[NUM_SET];
+            for (uint32_t i = 0; i < NUM_SET; ++i) {
+
+                remap_table[i]->state = SetState::INVALID;
+                remap_table[i]->num_access = 0;
+                remap_table[i]->remap_sets.push_back(i);
+                remap_table[i]->original_set = new uint32_t[NUM_WAY];
+
+                for (uint32_t j = 0; j < NUM_WAY; ++j) {
+                    remap_table[i]->original_set[j] = i;
+                }
+            }
+        }
+
+        for (uint32_t i = 0; i < NUM_CPUS; i++) {
             upper_level_icache[i] = NULL;
             upper_level_dcache[i] = NULL;
 
-            for (uint32_t j=0; j<NUM_TYPES; j++) {
+            for (uint32_t j = 0; j < NUM_TYPES; j++) {
                 sim_access[i][j] = 0;
                 sim_hit[i][j] = 0;
                 sim_miss[i][j] = 0;
@@ -143,7 +177,7 @@ class CACHE : public MEMORY {
             }
         }
 
-	total_miss_latency = 0;
+        total_miss_latency = 0;
 
         lower_level = NULL;
         extra_interface = NULL;
@@ -160,7 +194,7 @@ class CACHE : public MEMORY {
 
     // destructor
     ~CACHE() {
-        for (uint32_t i=0; i<NUM_SET; i++)
+        for (uint32_t i = 0; i < NUM_SET; i++)
             delete[] block[i];
         delete[] block;
     };
@@ -213,10 +247,10 @@ class CACHE : public MEMORY {
     void (*l1i_prefetcher_cache_fill)(uint32_t, uint64_t, uint32_t, uint32_t, uint8_t, uint64_t);
 
     uint32_t l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in),
-         llc_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in),
-         l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in),
-         llc_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in);
-    
+             llc_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in),
+             l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in),
+             llc_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in);
+
     uint32_t get_set(uint64_t address),
              get_way(uint64_t address, uint32_t set),
              find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type),
